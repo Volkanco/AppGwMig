@@ -132,25 +132,22 @@ Param(
     [string] $WafPolicyName
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-Function Private:Get-NameFromId {
+Function Get-NameFromId {
     param([string] $Id)
     if ($Id) { return $Id.Split("/")[-1] } else { return $null }
 }
 
-Function Private:Get-SubscriptionFromResourceId {
+Function Get-SubscriptionFromResourceId {
     param([string] $Id)
     if ($Id -match "/subscriptions/([^/]+)/") { return $matches[1] }
     return $null
 }
 
-Function Private:Get-ResourceGroupFromResourceId {
+Function Get-ResourceGroupFromResourceId {
     param([string] $Id)
     if ($Id -match "/resourceGroups/([^/]+)/") { return $matches[1] }
     return $null
