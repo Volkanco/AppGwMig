@@ -68,6 +68,11 @@ within the subnet is chosen.
 .PARAMETER WafPolicyName
 (Deploy mode, WAF SKU only) Name for the WAF policy resource. Defaults to <AppGwName>_WAFPolicy.
 
+.PARAMETER PrivateOnly
+(Deploy mode) When specified, the V2 gateway is deployed with a private frontend IP only.
+No public IP is created or attached. Use this when the gateway must not be internet-facing.
+The private IP can be specified via -PrivateIpAddress, or one will be assigned dynamically from the subnet.
+
 .EXAMPLE
 # Step 1 – export V1 configuration
 .\AzureAppGWMigrate.ps1 -Mode Backup `
@@ -81,6 +86,13 @@ within the subnet is chosen.
     -BackupFile "C:\backup\appgw-config.json" `
     -AppGwName "mygateway-v2" `
     -AppGwResourceGroupName "my-rg"
+
+# Deploy a private-only V2 gateway (no public IP)
+.\AzureAppGWMigrate.ps1 -Mode Deploy `
+    -BackupFile "C:\backup\appgw-config.json" `
+    -AppGwName "mygateway-v2" `
+    -AppGwResourceGroupName "my-rg" `
+    -PrivateOnly
 
 .INPUTS
 String
@@ -129,7 +141,10 @@ Param(
     [switch] $DisableAutoscale,
 
     [Parameter(Mandatory = $false)]
-    [string] $WafPolicyName
+    [string] $WafPolicyName,
+
+    [Parameter(Mandatory = $false)]
+    [switch] $PrivateOnly
 )
 
 # ---------------------------------------------------------------------------
@@ -797,7 +812,11 @@ Function Invoke-DeployMode {
     $isNewIPCreated = $false
     $publicFipData = $backup.FrontendIPConfigurations | Where-Object { $_.IsPublic -eq $true }
 
-    if ($PublicIpResourceId) {
+    if ($PrivateOnly) {
+        Write-Host "PrivateOnly mode: skipping public IP creation. Gateway will have private frontend only."
+        $pip = $null
+    }
+    elseif ($PublicIpResourceId) {
         $pipResource = Get-AzResource -ResourceId $PublicIpResourceId -ErrorAction SilentlyContinue
         if (-not $pipResource) {
             Write-Warning "Public IP resource '$PublicIpResourceId' not found."
@@ -836,6 +855,10 @@ Function Invoke-DeployMode {
 
     foreach ($fipData in $backup.FrontendIPConfigurations) {
         if ($fipData.IsPublic) {
+            if ($PrivateOnly) {
+                Write-Host "PrivateOnly mode: skipping public frontend IP '$($fipData.Name)'."
+                continue
+            }
             if (-not $pip) {
                 Write-Warning "Backup has a public frontend IP but no Public IP resource is available."
                 exit
@@ -860,6 +883,23 @@ Function Invoke-DeployMode {
         }
         $fipList.Add($newFip)
         $fipNameMap[$fipData.Name] = $newFip
+    }
+
+    # Auto-create private frontend IP when PrivateOnly mode has no private IPs in backup.
+    if ($PrivateOnly -and $fipList.Count -eq 0) {
+        Write-Host "PrivateOnly mode: backup had no private frontend IP. Creating one dynamically from subnet."
+        $autoPrivateFipName = "appGatewayPrivateFrontendIP"
+        $newFip = if ($PrivateIpAddress) {
+            New-AzApplicationGatewayFrontendIPConfig -Name $autoPrivateFipName -PrivateIPAddress $PrivateIpAddress -Subnet $subnet
+        } else {
+            New-AzApplicationGatewayFrontendIPConfig -Name $autoPrivateFipName -Subnet $subnet
+        }
+        $fipList.Add($newFip)
+        # Map all original public fip names to this new private fip so listeners still resolve
+        foreach ($fipData in $backup.FrontendIPConfigurations) {
+            $fipNameMap[$fipData.Name] = $newFip
+        }
+        Write-Host "Created private frontend IP: $autoPrivateFipName"
     }
 
     # --- Frontend ports ---
@@ -1225,7 +1265,11 @@ Function Invoke-DeployMode {
     Write-Host "  Resource Group  : $AppGwResourceGroupName"
     Write-Host "  Location        : $location"
     Write-Host "  Subnet          : $subnetName ($($subnet.AddressPrefix))"
-    if ($pip) { Write-Host "  Public IP       : $($pip.IpAddress)" }
+    if ($PrivateOnly) {
+        Write-Host "  Mode            : Private Only (no public IP)"
+    } elseif ($pip) {
+        Write-Host "  Public IP       : $($pip.IpAddress)"
+    }
     Write-Host ""
 
     # Post-deploy backend health validation
