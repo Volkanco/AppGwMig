@@ -153,7 +153,7 @@ Function Get-ResourceGroupFromResourceId {
     return $null
 }
 
-Function Private:GetApplicationGatewaySku {
+Function GetApplicationGatewaySku {
     param([string] $GwSkuTier)
     if ($GwSkuTier -eq "Standard") {
         return New-AzApplicationGatewaySku -Name Standard_v2 -Tier Standard_v2
@@ -163,7 +163,7 @@ Function Private:GetApplicationGatewaySku {
     }
 }
 
-Function Private:GetCapacityUnits {
+Function GetCapacityUnits {
     param([object] $AppgwSku)
     $lowestPossibleCapacity = 2
     $highestPossibleCapacity = 125
@@ -200,7 +200,7 @@ Function Private:GetCapacityUnits {
     return $minCapacity, $maxCapacity
 }
 
-Function Private:GetAvailabilityZoneMappings {
+Function GetAvailabilityZoneMappings {
     param([string] $Subscription, [string] $Location)
     try {
         $response = Invoke-AzRestMethod -Method GET `
@@ -227,7 +227,7 @@ Function Private:GetAvailabilityZoneMappings {
 # BACKUP MODE
 # ---------------------------------------------------------------------------
 
-Function Private:Invoke-BackupMode {
+Function Invoke-BackupMode {
     # 1. Validate ResourceId parameter
     if (-not $ResourceId) {
         Write-Error "Parameter -ResourceId is required when -Mode is 'Backup'."
@@ -594,7 +594,7 @@ NOTE: SSL certificate private keys cannot be exported by this script.
 # DEPLOY MODE – WAF Policy helper
 # ---------------------------------------------------------------------------
 
-Function Private:New-WafPolicyFromBackup {
+Function New-WafPolicyFromBackup {
     param(
         [hashtable]  $WafConfig,
         [string]     $PolicyName,
@@ -693,7 +693,7 @@ Function Private:New-WafPolicyFromBackup {
 # DEPLOY MODE
 # ---------------------------------------------------------------------------
 
-Function Private:Invoke-DeployMode {
+Function Invoke-DeployMode {
     # 1. Validate BackupFile
     if (-not (Test-Path $BackupFile)) {
         Write-Error "Backup file not found: $BackupFile"
