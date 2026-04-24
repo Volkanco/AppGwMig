@@ -754,7 +754,7 @@ To deploy a private-only gateway you must first edit the backup file '$BackupFil
 
 After editing the backup file, re-run the Deploy command with -PrivateOnly.
 "@
-            exit
+            exit 1
         }
         Write-Host "PrivateOnly mode: backup has no public frontend IPs. Proceeding with private-only deployment."
     }
