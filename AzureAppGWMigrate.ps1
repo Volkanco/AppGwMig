@@ -212,6 +212,11 @@ Function GetCapacityUnits {
         $maxCapacity = $lowestPossibleCapacity
     }
 
+    # Azure requires MaxCapacity strictly greater than MinCapacity for autoscale
+    if ($maxCapacity -le $minCapacity) {
+        $maxCapacity = $minCapacity + 1
+    }
+
     return $minCapacity, $maxCapacity
 }
 
@@ -611,7 +616,7 @@ NOTE: SSL certificate private keys cannot be exported by this script.
 
 Function New-WafPolicyFromBackup {
     param(
-        [hashtable]  $WafConfig,
+        [object]     $WafConfig,
         [string]     $PolicyName,
         [string]     $ResourceGroupName,
         [string]     $Location
@@ -1174,44 +1179,39 @@ Function Invoke-DeployMode {
     $tags["CreatedUsing"] = "AzureAppGWMigrateScript"
     if ($atleastOneHTTPSBackend)  { $tags["RelaxBackendSSLCertificateValidations"] = "true" }
 
-    # --- WAF policy (WAF_v2 only) ---
-    $wafPolicy       = $null
-    $isWafCreated    = $false
+    # --- WAF Policy (required for WAF_v2 SKU) ---
+    $wafPolicy          = $null
+    $isWafPolicyCreated = $false
     if ($meta.SourceSkuTier -eq "WAF") {
-        if (-not $WafPolicyName) { $WafPolicyName = $AppGwName + "_WAFPolicy" }
-        $existingWaf = Get-AzApplicationGatewayFirewallPolicy -ResourceGroupName $AppGwResourceGroupName -Name $WafPolicyName -ErrorAction SilentlyContinue
-        if ($existingWaf) {
-            Write-Warning "WAF Policy '$WafPolicyName' already exists. Delete it or supply a unique -WafPolicyName."
-            exit
+        if (-not $WafPolicyName) {
+            $WafPolicyName = $AppGwName + "_WAFPolicy"
         }
-        $wafCfgData = if ($backup.WafConfiguration) {
-            @{
-                Enabled                = $backup.WafConfiguration.Enabled
-                FirewallMode           = $backup.WafConfiguration.FirewallMode
-                RuleSetType            = $backup.WafConfiguration.RuleSetType
-                RuleSetVersion         = $backup.WafConfiguration.RuleSetVersion
-                DisabledRuleGroups     = if ($backup.WafConfiguration.DisabledRuleGroups) { @($backup.WafConfiguration.DisabledRuleGroups) } else { @() }
-                Exclusions             = if ($backup.WafConfiguration.Exclusions) { @($backup.WafConfiguration.Exclusions) } else { @() }
-                RequestBodyCheck       = $backup.WafConfiguration.RequestBodyCheck
-                MaxRequestBodySizeInKb = $backup.WafConfiguration.MaxRequestBodySizeInKb
-                FileUploadLimitInMb    = $backup.WafConfiguration.FileUploadLimitInMb
-            }
+        # Check if WAF policy already exists
+        $existingWafPolicy = Get-AzApplicationGatewayFirewallPolicy -ResourceGroupName $AppGwResourceGroupName -Name $WafPolicyName -ErrorAction SilentlyContinue
+        if ($existingWafPolicy) {
+            Write-Warning "WAF Policy '$WafPolicyName' already exists. Reusing it."
+            $wafPolicy = $existingWafPolicy
         }
         else {
-            @{
-                Enabled                = $false
-                FirewallMode           = "Detection"
-                RuleSetType            = "Microsoft_DefaultRuleSet"
-                RuleSetVersion         = "2.1"
-                DisabledRuleGroups     = @()
-                Exclusions             = @()
-                RequestBodyCheck       = $true
-                MaxRequestBodySizeInKb = 128
-                FileUploadLimitInMb    = 100
+            if ($backup.WafConfiguration) {
+                # Recreate WAF policy from backup configuration
+                $wafPolicy = New-WafPolicyFromBackup -WafConfig $backup.WafConfiguration -PolicyName $WafPolicyName -ResourceGroupName $AppGwResourceGroupName -Location $location
             }
+            else {
+                # No WAF config in backup — create a default WAF policy
+                Write-Warning "No WAF configuration found in backup. Creating a default WAF policy."
+                $defaultPolicySetting = New-AzApplicationGatewayFirewallPolicySetting -MaxFileUploadInMb 100 -MaxRequestBodySizeInKb 128 -Mode Detection -State Disabled
+                $defaultManagedRuleSet = New-AzApplicationGatewayFirewallPolicyManagedRuleSet -RuleSetType "Microsoft_DefaultRuleSet" -RuleSetVersion "2.1"
+                $defaultManagedRule    = New-AzApplicationGatewayFirewallPolicyManagedRule -ManagedRuleSet $defaultManagedRuleSet
+                $wafPolicy = New-AzApplicationGatewayFirewallPolicy -Name $WafPolicyName -ResourceGroupName $AppGwResourceGroupName -PolicySetting $defaultPolicySetting -ManagedRule $defaultManagedRule -Location $location
+            }
+            if (-not $wafPolicy) {
+                Write-Error "Failed to create WAF Policy '$WafPolicyName'."
+                exit
+            }
+            $isWafPolicyCreated = $true
+            Write-Host "WAF Policy '$WafPolicyName' created successfully."
         }
-        $wafPolicy    = New-WafPolicyFromBackup -WafConfig $wafCfgData -PolicyName $WafPolicyName -ResourceGroupName $AppGwResourceGroupName -Location $location
-        $isWafCreated = $true
     }
 
     # --- Verify no gateway with the same name exists ---
@@ -1246,7 +1246,7 @@ Function Invoke-DeployMode {
     if ($urlPathMapList.Count -gt 0){ $newGwParams["UrlPathMaps"] = $urlPathMapList }
     if ($sslPolicyObj)            { $newGwParams["SslPolicy"] = $sslPolicyObj }
     if ($zones)                   { $newGwParams["Zone"] = $zones }
-    if ($isWafCreated -and $wafPolicy) { $newGwParams["FirewallPolicyId"] = $wafPolicy.Id }
+    if ($wafPolicy)               { $newGwParams["FirewallPolicyId"] = $wafPolicy.Id }
     if ($backup.CustomErrorConfigurations -and $backup.CustomErrorConfigurations.Count -gt 0) {
         $newGwParams["CustomErrorConfiguration"] = $backup.CustomErrorConfigurations
     }
@@ -1256,6 +1256,9 @@ Function Invoke-DeployMode {
 
     if (-not $newAppGw) {
         Write-Error "Creation of V2 Application Gateway failed. Please retry or contact Azure Support."
+        if ($isWafPolicyCreated -and $wafPolicy) {
+            Remove-AzApplicationGatewayFirewallPolicy -Name $WafPolicyName -ResourceGroupName $AppGwResourceGroupName -Force -ErrorAction SilentlyContinue
+        }
         exit
     }
 
