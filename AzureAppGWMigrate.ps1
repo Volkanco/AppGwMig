@@ -738,6 +738,27 @@ Function Invoke-DeployMode {
     $meta     = $backup.BackupMetadata
     $netInfo  = $backup.Networking
 
+    # --- PrivateOnly validation ---
+    if ($PrivateOnly) {
+        $publicFrontends = $backup.FrontendIPConfigurations | Where-Object { $_.IsPublic -eq $true }
+        if ($publicFrontends) {
+            $publicNames = ($publicFrontends | ForEach-Object { $_.Name }) -join ", "
+            Write-Error @"
+-PrivateOnly was specified, but the backup file contains public frontend IP configuration(s): $publicNames
+
+To deploy a private-only gateway you must first edit the backup file '$BackupFile' and either:
+  1. Remove the public frontend IP entry/entries from the 'FrontendIPConfigurations' array, AND
+     remove or update any listeners that reference those public frontend IPs in the 'HttpListeners' array, AND
+     remove or update any routing rules referencing those listeners.
+  2. OR change 'IsPublic' to false and set 'PrivateIPAddress' / 'PrivateIPAllocationMethod' accordingly.
+
+After editing the backup file, re-run the Deploy command with -PrivateOnly.
+"@
+            exit
+        }
+        Write-Host "PrivateOnly mode: backup has no public frontend IPs. Proceeding with private-only deployment."
+    }
+
     # 3. Default AppGwName
     if (-not $AppGwName) {
         $AppGwName = $meta.SourceGatewayName + "_v2"
@@ -860,10 +881,6 @@ Function Invoke-DeployMode {
 
     foreach ($fipData in $backup.FrontendIPConfigurations) {
         if ($fipData.IsPublic) {
-            if ($PrivateOnly) {
-                Write-Host "PrivateOnly mode: skipping public frontend IP '$($fipData.Name)'."
-                continue
-            }
             if (-not $pip) {
                 Write-Warning "Backup has a public frontend IP but no Public IP resource is available."
                 exit
@@ -888,23 +905,6 @@ Function Invoke-DeployMode {
         }
         $fipList.Add($newFip)
         $fipNameMap[$fipData.Name] = $newFip
-    }
-
-    # Auto-create private frontend IP when PrivateOnly mode has no private IPs in backup.
-    if ($PrivateOnly -and $fipList.Count -eq 0) {
-        Write-Host "PrivateOnly mode: backup had no private frontend IP. Creating one dynamically from subnet."
-        $autoPrivateFipName = "appGatewayPrivateFrontendIP"
-        $newFip = if ($PrivateIpAddress) {
-            New-AzApplicationGatewayFrontendIPConfig -Name $autoPrivateFipName -PrivateIPAddress $PrivateIpAddress -Subnet $subnet
-        } else {
-            New-AzApplicationGatewayFrontendIPConfig -Name $autoPrivateFipName -Subnet $subnet
-        }
-        $fipList.Add($newFip)
-        # Map all original public fip names to this new private fip so listeners still resolve
-        foreach ($fipData in $backup.FrontendIPConfigurations) {
-            $fipNameMap[$fipData.Name] = $newFip
-        }
-        Write-Host "Created private frontend IP: $autoPrivateFipName"
     }
 
     # --- Frontend ports ---
